@@ -1,9 +1,12 @@
 import { Button } from "@/components/ui/button"
-
+import ChatCard from "@/components/chat-interface/chat-card"
 export default function Page() {
   return (
     <div>
       <h1 className="text-3xl text-center font-bold py-5">Home Page</h1>
+
+      <ChatCard />
+
       <Button className="fixed rounded-full bottom-5 right-5 bg-amber-300 z-50 group hover:bg-amber-500 transition">
         <span className="absolute inset-0 bg-red-300 rounded-full opacity-70 animate-ping"></span>
         
