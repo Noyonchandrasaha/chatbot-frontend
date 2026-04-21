@@ -23,13 +23,7 @@ type ChatDrawerProps = {
 }
 
 export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: uuidv4(),
-      role: "assistant",
-      content: "Hello 👋 How can I help you today?",
-    },
-  ])
+  const [messages, setMessages] = useState<Message[]>([])
 
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
@@ -404,6 +398,18 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
 
             {/* Messages */}
             <div className="relative z-10 h-full overflow-y-auto p-4 space-y-6 no-scrollbar">
+              {messages.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center text-center p-6 animate-in fade-in zoom-in duration-500">
+                  <div className="w-16 h-16 bg-gradient-to-tr from-blue-600 to-amber-400 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-blue-200">
+                    <Bot size={32} />
+                  </div>
+                  <h3 className="text-2xl font-bold text-gray-900 mb-2">Meet COCO</h3>
+                  <p className="text-sm text-gray-500 max-w-[240px] leading-relaxed">
+                    Your personal AI assistant, powered by the latest LangGraph LangChain workflows my brain is Open AI. How can I help you today?
+                  </p>
+                </div>
+              )}
+
               {messages.map((msg) => (
                 <div key={msg.id} className="group animate-in fade-in slide-in-from-bottom-2 duration-300">
                   <div
