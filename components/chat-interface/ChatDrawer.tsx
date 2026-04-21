@@ -4,12 +4,17 @@ import { useState, useRef, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
-import { X, Send } from "lucide-react"
+import { X, Send, Bot, User, Sparkles } from "lucide-react"
 import Image from "next/image"
+import ReactMarkdown from "react-markdown"
+import { v4 as uuidv4 } from "uuid"
 
 type Message = {
-  role: "user" | "ai-bot"
-  text: string
+  id: string
+  role: "user" | "assistant"
+  content: string
+  isStreaming?: boolean
+  status?: string
 }
 
 type ChatDrawerProps = {
@@ -19,39 +24,222 @@ type ChatDrawerProps = {
 
 export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
   const [messages, setMessages] = useState<Message[]>([
-    { role: "ai-bot", text: "Hello 👋 How can I help you?" },
+    {
+      id: uuidv4(),
+      role: "assistant",
+      content: "Hello 👋 How can I help you today?",
+    },
   ])
 
   const [input, setInput] = useState("")
+  const [isLoading, setIsLoading] = useState(false)
+  const [currentStatus, setCurrentStatus] = useState("")
+  const [sessionId] = useState(() => uuidv4())
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const frameRef = useRef<number | null>(null)         // ✅ track animation frame
+  const frameRef = useRef<number | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
+  // Auto scroll to latest message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
 
-  const handleSend = () => {
-    if (!input.trim()) return
-    setMessages((p) => [...p, { role: "user", text: input }])
+  // ✅ Stream messages from backend with status updates
+  const handleSendMessage = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (!input.trim() || isLoading) return
+
+    const userMessage = input.trim()
     setInput("")
-    setTimeout(() => {
-      setMessages((p) => [
-        ...p,
-        { role: "ai-bot", text: "Thanks! I'm processing your request..." },
-      ])
-    }, 700)
+
+    // ✅ Add user message immediately
+    const userMsg: Message = {
+      id: uuidv4(),
+      role: "user",
+      content: userMessage,
+    }
+    setMessages((prev) => [...prev, userMsg])
+
+    // ✅ Add streaming assistant message
+    const assistantId = uuidv4()
+    const emptyAssistantMsg: Message = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      isStreaming: true,
+      status: "Processing...",
+    }
+    setMessages((prev) => [...prev, emptyAssistantMsg])
+
+    setIsLoading(true)
+    setCurrentStatus("Starting...")
+    abortControllerRef.current = new AbortController()
+
+    try {
+      // ✅ Call your Next.js API route
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          userMessage: userMessage,
+          sessionId: sessionId,
+        }),
+        signal: abortControllerRef.current.signal,
+      })
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.statusText}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error("No response body")
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+
+        // ✅ Keep the last incomplete line in buffer
+        buffer = lines[lines.length - 1]
+
+        for (let i = 0; i < lines.length - 1; i++) {
+          const line = lines[i].trim()
+          if (!line) continue
+
+          console.log("Raw Stream Line:", line)
+
+          if (line.startsWith("data: ")) {
+            try {
+              const jsonStr = line.slice(6).trim()
+              if (jsonStr === "[DONE]") {
+                console.log("Stream signaled completion");
+                continue
+              }
+
+              const chunk = JSON.parse(jsonStr)
+              console.log("Parsed Chunk:", chunk)
+
+              // ✅ Handle different message types from backend
+              if ((chunk.type === "text" || chunk.type === "token") && (chunk.content || chunk.text)) {
+                const content = chunk.content || chunk.text
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          content: msg.content + content,
+                        }
+                      : msg
+                  )
+                )
+              } else if (chunk.type === "status") {
+                // ✅ Handle status updates and display them
+                const statusText = typeof chunk.data === "string" 
+                  ? chunk.data 
+                  : (chunk.data?.status || JSON.stringify(chunk.data))
+                setCurrentStatus(statusText)
+
+                // Also update the message with status
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          status: statusText,
+                        }
+                      : msg
+                  )
+                )
+
+                console.log("Status Update:", statusText)
+              } else if (chunk.type === "update") {
+                // ✅ Handle node updates from your LangChain graph
+                const nodeStatus = `${chunk.node}: Processing...`
+                setCurrentStatus(nodeStatus)
+
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          status: nodeStatus,
+                        }
+                      : msg
+                  )
+                )
+
+                console.log("Node Update:", chunk.node, chunk.data)
+              } else if (chunk.type === "error") {
+                // ✅ Handle error events
+                console.error("Stream Error:", chunk.error)
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          status: `Error: ${chunk.error}`,
+                        }
+                      : msg
+                  )
+                )
+              }
+            } catch (e) {
+              console.error("Failed to parse chunk:", e, line)
+            }
+          }
+        }
+      }
+
+      // ✅ Mark streaming as complete
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? { ...msg, isStreaming: false, status: undefined }
+            : msg
+        )
+      )
+      setCurrentStatus("")
+    } catch (error) {
+      if (error instanceof Error && error.name !== "AbortError") {
+        console.error("Chat error:", error)
+
+        // ✅ Add error message
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId
+              ? {
+                  ...msg,
+                  content: `Error: ${error.message}`,
+                  isStreaming: false,
+                  status: undefined,
+                }
+              : msg
+          )
+        )
+        setCurrentStatus("")
+      }
+    } finally {
+      setIsLoading(false)
+    }
   }
 
-  // ✅ Re-run rain effect whenever `open` changes to true
+  // 💧 Rain Effect with proper initialization
   useEffect(() => {
     if (!open) {
-      // Cancel animation when drawer closes
       if (frameRef.current) cancelAnimationFrame(frameRef.current)
       return
     }
 
-    // ✅ Delay to wait for spring animation to settle & canvas to have real dimensions
     const initTimeout = setTimeout(() => {
       const canvas = canvasRef.current
       if (!canvas) return
@@ -64,7 +252,6 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
 
       const resizeCanvas = () => {
         const rect = parent.getBoundingClientRect()
-        // ✅ Guard: only resize if dimensions are real
         if (rect.width > 0 && rect.height > 0) {
           canvas.width = rect.width
           canvas.height = rect.height
@@ -115,7 +302,6 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
         frameRef.current = requestAnimationFrame(drawRain)
       }
 
-      // ✅ Cancel any previous animation before starting a new one
       if (frameRef.current) cancelAnimationFrame(frameRef.current)
       drawRain()
 
@@ -126,10 +312,19 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
         window.removeEventListener("resize", handleResize)
         if (frameRef.current) cancelAnimationFrame(frameRef.current)
       }
-    }, 100) // ✅ 100ms delay lets the drawer animate into view first
+    }, 100)
 
     return () => clearTimeout(initTimeout)
-  }, [open]) // ✅ depends on `open`
+  }, [open])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
 
   return (
     <AnimatePresence>
@@ -142,7 +337,7 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
           className="fixed top-0 right-0 h-screen w-80 sm:w-96 bg-white shadow-2xl border-l z-50 flex flex-col"
         >
           {/* Header */}
-          <div className="bg-blue-600 text-white flex items-center justify-between px-4 py-3">
+          <div className="bg-blue-600 text-white flex items-center justify-between px-4 py-3 shrink-0">
             <h2 className="text-base font-semibold">AI Assistant</h2>
             <Button
               variant="ghost"
@@ -154,10 +349,48 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
             </Button>
           </div>
 
-          {/* BODY */}
-          <div className="relative flex-1 h-full overflow-hidden bg-mist-200">
+          {/* ✅ Status Bar (Shows current processing status) */}
+          {currentStatus && (
+            <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  <div
+                    className="w-1.5 h-1.5 rounded-full bg-blue-500"
+                    style={{
+                      animation: "bounce 1.4s infinite",
+                      animationDelay: "0s",
+                    }}
+                  />
+                  <div
+                    className="w-1.5 h-1.5 rounded-full bg-blue-500"
+                    style={{
+                      animation: "bounce 1.4s infinite",
+                      animationDelay: "0.2s",
+                    }}
+                  />
+                  <div
+                    className="w-1.5 h-1.5 rounded-full bg-blue-500"
+                    style={{
+                      animation: "bounce 1.4s infinite",
+                      animationDelay: "0.4s",
+                    }}
+                  />
+                </div>
+                <span className="text-xs text-gray-700 font-medium">
+                  {currentStatus}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Body with Messages */}
+          <div className="relative flex-1 h-full overflow-hidden bg-gradient-to-b from-blue-50 to-white">
+            {/* Background Layer */}
             <div className="absolute inset-0 z-0 pointer-events-none">
-              <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+              <canvas
+                ref={canvasRef}
+                className="absolute inset-0 w-full h-full"
+              />
               <div className="absolute inset-0 flex items-center justify-center">
                 <Image
                   src="/watermark.png"
@@ -169,48 +402,129 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
               </div>
             </div>
 
-            <div className="relative z-10 h-full overflow-y-auto p-3 space-y-3 no-scrollbar">
-              {messages.map((msg, index) => (
-                <div
-                  key={index}
-                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                >
+            {/* Messages */}
+            <div className="relative z-10 h-full overflow-y-auto p-4 space-y-6 no-scrollbar">
+              {messages.map((msg) => (
+                <div key={msg.id} className="group animate-in fade-in slide-in-from-bottom-2 duration-300">
                   <div
-                    className={`px-3 py-2 rounded-xl max-w-[75%] text-sm ${
-                      msg.role === "user"
-                        ? "bg-blue-500 text-white"
-                        : "bg-amber-200 text-black"
+                    className={`flex gap-3 ${
+                      msg.role === "user" ? "flex-row-reverse" : "flex-row"
                     }`}
                   >
-                    {msg.text}
+                    {/* Icon / Avatar */}
+                    <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center border ${
+                      msg.role === "user" 
+                        ? "bg-blue-600 border-blue-500 text-white" 
+                        : "bg-white border-amber-200 text-amber-600 shadow-sm"
+                    }`}>
+                      {msg.role === "user" ? <User size={16} /> : <Bot size={16} />}
+                    </div>
+
+                    {/* Content Area */}
+                    <div className={`flex flex-col max-w-[85%] ${msg.role === "user" ? "items-end" : "items-start"}`}>
+                      <div className={`px-1 py-0.5 mb-1 text-[10px] uppercase tracking-wider font-bold opacity-40 select-none ${
+                        msg.role === "user" ? "text-right" : "text-left"
+                      }`}>
+                        {msg.role === "user" ? "You" : "Assistant"}
+                      </div>
+                      
+                      <div
+                        className={`text-sm leading-relaxed ${
+                          msg.role === "user"
+                            ? "bg-blue-600 text-white px-4 py-2.5 rounded-2xl rounded-tr-none shadow-md"
+                            : "bg-transparent text-gray-800"
+                        }`}
+                      >
+                        <div className={`prose prose-sm max-w-none dark:prose-invert prose-p:m-0 prose-headings:m-0 prose-lists:m-0 ${
+                          msg.role === "user" ? "text-white" : "text-gray-800"
+                        }`}>
+                          <ReactMarkdown
+                            components={{
+                              p: ({ node, ...props }) => (
+                                <p style={{ marginBottom: "0.5rem" }} {...props} />
+                              ),
+                              li: ({ node, ...props }) => (
+                                <li style={{ marginLeft: "1rem" }} {...props} />
+                              ),
+                              code: ({ node, ...props }) => (
+                                <code className="bg-gray-100 rounded px-1 py-0.5 font-mono text-xs" {...props} />
+                              ),
+                              pre: ({ node, ...props }) => (
+                                <pre className="bg-gray-900 text-white p-3 rounded-lg my-2 overflow-x-auto text-xs" {...props} />
+                              )
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+
+                        {/* ✅ Streaming indicator for Claude-style */}
+                        {msg.isStreaming && !msg.content && (
+                          <div className="flex items-center gap-1.5 mt-1 bg-amber-50 px-2 py-1 rounded-md border border-amber-100 w-fit">
+                            <Sparkles size={12} className="text-amber-500 animate-pulse" />
+                            <span className="text-[10px] text-amber-600 font-medium animate-pulse">Thinking...</span>
+                          </div>
+                        )}
+                        
+                        {msg.isStreaming && msg.content && (
+                           <span className="inline-block w-1.5 h-4 bg-blue-400 ml-1 animate-pulse align-middle" />
+                        )}
+                      </div>
+                      
+                      {/* ✅ Display status below message */}
+                      {msg.status && (
+                        <div className="flex items-center gap-1.5 mt-2 px-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping" />
+                          <span className="text-[10px] text-gray-400 font-medium">
+                            {msg.status}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
+
               <div ref={messagesEndRef} />
             </div>
           </div>
 
-          {/* INPUT */}
-          <div className="border-t bg-white p-3 flex flex-col gap-2">
-            <div className="flex gap-2 items-center">
+          {/* Input Section */}
+          <div className="border-t bg-white p-4 flex flex-col gap-3 shrink-0">
+            <form onSubmit={handleSendMessage} className="flex gap-2 items-center">
               <Input
                 placeholder="Type a message..."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                disabled={isLoading}
+                className="flex-1 rounded-full px-4 py-2 bg-gray-100 border-0 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <Button
-                onClick={handleSend}
-                disabled={!input.trim()}
-                className="bg-blue-500 hover:bg-blue-600"
+                type="submit"
+                disabled={!input.trim() || isLoading}
+                className="bg-blue-600 hover:bg-blue-700 text-white rounded-full p-2.5 h-auto w-auto transition-all duration-200"
               >
-                <Send size={16} />
+                <Send size={18} />
               </Button>
-            </div>
-            <p className="text-center text-[10px] text-gray-400">
+            </form>
+            <p className="text-center text-xs text-gray-400">
               AI may make mistakes. Please verify important information.
             </p>
           </div>
+
+          {/* Animations */}
+          <style>{`
+            @keyframes bounce {
+              0%, 80%, 100% {
+                opacity: 0.5;
+                transform: translateY(0);
+              }
+              40% {
+                opacity: 1;
+                transform: translateY(-8px);
+              }
+            }
+          `}</style>
         </motion.div>
       )}
     </AnimatePresence>
