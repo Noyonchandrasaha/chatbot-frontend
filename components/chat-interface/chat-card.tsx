@@ -9,7 +9,7 @@ import {
   CardTitle,
   CardContent,
   CardFooter,
-} from "@/components/ui/card"
+} from "@/components/ui/card";
 import { X, Send } from "lucide-react"
 
 // ✅ Props type
